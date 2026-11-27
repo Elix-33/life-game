@@ -102,7 +102,7 @@ function view(){
     const grp=[['all','Every day']].concat(DAYS.map((d,i)=>[String(i),d]));
     grp.forEach(([k,n])=>{const l=S.sched.filter(i=>String(i.d)===k).sort((a,b)=>a.tm.localeCompare(b.tm));if(l.length)h+='<div class="c"><h3>'+n+'</h3>'+l.map(i=>'<div class="row"><span class="tm">'+esc(i.tm)+'</span><span>'+esc(i.t)+'</span><button class="x" data-dels="'+i.id+'">✕</button></div>').join('')+'</div>'});
   }else{
-    h+='<div class="c"><h3>🤖 Your AI coach</h3><p class="mut">Reads your schedule and goals, and can add goals, add schedule items, or change colors. Try: add a daily goal to drink water, or make the app green.</p><div class="f"><button class="btn" data-ai="Plan my day realistically based on my schedule and goals.">Plan my day</button><button class="btn g" data-ai="Review my goals, tell me which to focus on, and break it into small steps.">Review goals</button><button class="btn g" data-ai="Suggest 5 new goals that fit my schedule.">Suggest goals</button></div><div class="f"><textarea id="aq" placeholder="Ask anything...">'+esc(aiQ)+'</textarea><button class="btn" data-ask>Ask</button></div><div id="aiout">'+esc(aiText)+'</div></div>'+(window.claude?'':'<div class="c"><h3>🔑 API key</h3><p class="mut">Your key stays in this browser only. Use a personal key with a spending limit.</p><div class="f"><input type="password" id="ak" placeholder="'+(S.key?'Key saved (paste a new one to replace)':'sk-ant-...')+'"><button class="btn" data-key>Save</button><button class="btn g" data-nokey>Remove</button></div></div>');
+    h+='<div class="c"><h3>🤖 Your AI coach</h3><p class="mut">Reads your schedule and goals, and can add goals, add schedule items, or change colors. Try: add a daily goal to drink water, or make the app green.</p><div class="f"><button class="btn" data-ai="Plan my day realistically based on my schedule and goals.">Plan my day</button><button class="btn g" data-ai="Review my goals, tell me which to focus on, and break it into small steps.">Review goals</button><button class="btn g" data-ai="Suggest 5 new goals that fit my schedule.">Suggest goals</button></div><div class="f"><textarea id="aq" placeholder="Ask anything...">'+esc(aiQ)+'</textarea><button class="btn" data-ask>Ask</button></div><div id="aiout">'+esc(aiText)+'</div></div>'+(window.claude?'':'<div class="c"><h3>🔑 API key</h3><p class="mut">Your key stays in this browser only. Get a free Gemini key at aistudio.google.com/apikey (free tier has daily limits). Keys starting with sk-ant use Anthropic instead.</p><div class="f"><input type="password" id="ak" placeholder="'+(S.key?'Key saved (paste a new one to replace)':'Paste your API key')+'"><button class="btn" data-key>Save</button><button class="btn g" data-nokey>Remove</button></div></div>');
   }
   $('#v').innerHTML=h;
 }
@@ -128,7 +128,30 @@ const TOOLS=[
  {name:'set_theme',description:'Change app colors. Optional keys: pri (header and buttons), acc (XP accent), bg (page background), card (cards), ink (text). Values are CSS colors such as #22aa66.',inputSchema:{type:'object',properties:{pri:{type:'string'},acc:{type:'string'},bg:{type:'string'},card:{type:'string'},ink:{type:'string'}}},execute:async i=>{['pri','acc','bg','card','ink'].forEach(k=>{if(i[k]&&CSS.supports('color',i[k]))S.theme[k]=i[k]});save();applyTheme();return 'theme updated'}},
  {name:'reset_theme',description:'Restore the default colors.',inputSchema:{type:'object',properties:{}},execute:async()=>{S.theme={};save();applyTheme();return 'reset'}}
 ];
+const GEM='gemini-3.8-flash';
+async function callGemini(p){
+  const contents=[{role:'user',parts:[{text:p}]}];
+  const tools=[{functionDeclarations:TOOLS.map(t=>({name:t.name,description:t.description,parameters:Object.keys(t.inputSchema.properties||{}).length?t.inputSchema:undefined}))}];
+  for(let n=0;n<5;n++){
+    const res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+GEM+':generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':S.key},body:JSON.stringify({contents,tools})});
+    const j=await res.json();
+    const m=(j.error&&j.error.message)||'error';
+    if(!res.ok)throw {code:res.status===429?'rate':(res.status===400||res.status===403)&&/key/i.test(m)?'bad_key':'error',message:m};
+    const c=j.candidates&&j.candidates[0]&&j.candidates[0].content;
+    if(!c)return {text:'No answer.'};
+    contents.push(c);
+    const parts=c.parts||[];
+    const calls=parts.filter(x=>x.functionCall);
+    const text=parts.filter(x=>x.text).map(x=>x.text).join(' ');
+    if(!calls.length)return {text};
+    const out=[];
+    for(const x of calls){const t=TOOLS.find(y=>y.name===x.functionCall.name);let r;try{r={result:await t.execute(x.functionCall.args||{})}}catch(e){r={error:String(e&&e.message||e)}}out.push({functionResponse:{name:x.functionCall.name,response:r}})}
+    contents.push({role:'user',parts:out});
+  }
+  return {text:'Done.'};
+}
 async function callKey(p){
+  if(!S.key.startsWith('sk-ant'))return callGemini(p);
   const msgs=[{role:'user',content:p}];
   const tools=TOOLS.map(t=>({name:t.name,description:t.description,input_schema:t.inputSchema}));
   for(let n=0;n<5;n++){
@@ -156,7 +179,7 @@ async function ask(q){
   try{
     const r=viaKey?await callKey(p):await sample(p,{onText:({text})=>{aiText=text;const o=$('#aiout');if(o)o.textContent=text},tools:TOOLS,cache:false});
     aiText=r.text;
-  }catch(e){aiText=e&&e.code==='not_granted'?'Please allow the AI coach to run.':e&&e.code==='bad_key'?'That API key was rejected. Check it and save it again.':'Something went wrong, please try again.'}
+  }catch(e){aiText=e&&e.code==='not_granted'?'Please allow the AI coach to run.':e&&e.code==='bad_key'?'That API key was rejected. Check it and save it again.':e&&e.code==='rate'?'Free limit reached. Wait a minute and try again.':'Something went wrong: '+String(e&&e.message||'try again').slice(0,200)}
   const o=$('#aiout');if(o)o.textContent=aiText;render();
 }
 function toast(m){const t=document.createElement('div');t.className='toast';t.textContent=m;document.body.appendChild(t);setTimeout(()=>t.remove(),6000)}
